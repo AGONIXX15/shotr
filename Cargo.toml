@@ -1,0 +1,16 @@
+[package]
+name = "shotr"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4.6.8", features = ["derive"] }
+fontdue = "0.9"
+serde = { version = "1.0.229", features = ["derive"] }
+smithay-client-toolkit = "0.21"
+tiny-skia = "0.12"
+toml = "1.2.1"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "unstable"] }
