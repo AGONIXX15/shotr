@@ -22,8 +22,8 @@ pub fn stdout_of(program: &str, args: &[&str]) -> Result<Vec<u8>> {
 }
 
 // None when the dialog is cancelled
-pub fn zenity(args: &[&str]) -> Result<Option<String>> {
-    let out = Command::new("zenity")
+pub fn zenity(program: &str, args: &[&str]) -> Result<Option<String>> {
+    let out = Command::new(program)
         .args(args)
         .output()
         .context("could not run zenity")?;

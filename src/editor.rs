@@ -194,6 +194,11 @@ impl Editor {
         Some([top.x, top.y, CARET_WIDTH, bottom.y - top.y])
     }
 
+    #[cfg(test)]
+    pub fn color(&self) -> Color {
+        self.color
+    }
+
     pub fn toolbars_shown(&self) -> bool {
         self.toolbars
     }

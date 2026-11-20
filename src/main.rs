@@ -7,6 +7,7 @@
     clippy::cast_sign_loss
 )]
 
+mod actions;
 mod config;
 mod docs;
 mod editor;

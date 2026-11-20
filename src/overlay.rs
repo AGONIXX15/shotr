@@ -1,7 +1,4 @@
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::path::PathBuf;
 
 use anyhow::{Context, Error, Result, anyhow};
 use smithay_client_toolkit::{
@@ -43,42 +40,15 @@ use wayland_protocols::wp::{
 };
 
 use crate::{
-    config::{
-        APP_ICON, BYTES_PER_PIXEL, IME_SURROUNDING_MAX, MSG_COPIED, MSG_FAILED, MSG_NO_OUTPUT,
-        MSG_PATH_COPIED, MSG_SAVED, NAMESPACE, OUTPUT_ROUNDTRIPS, PNG_MIME, STDIO_PATH, TEXT_MIME,
-        ZENITY_COLOR_ARGS, ZENITY_SAVE_ARGS,
-    },
+    actions::{Actions, Stacking},
+    config::{BYTES_PER_PIXEL, IME_SURROUNDING_MAX, MSG_NO_OUTPUT, NAMESPACE, OUTPUT_ROUNDTRIPS},
     editor::{Editor, Request},
     font::Fonts,
-    output,
-    settings::{Act, ExitTrigger, Settings, Thumbnail, exits_after},
-    style::Color,
+    settings::Settings,
     text::clip_window,
     tools::Mods,
     util::{self, Stopwatch},
 };
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Outcome {
-    Done,
-    Cancelled,
-}
-
-// Runs the actions in order; true when the app should exit. A cancelled dialog ends the chain.
-fn run_chain(
-    acts: &[Act],
-    early_exit: &[ExitTrigger],
-    mut perform: impl FnMut(Act) -> Result<Outcome>,
-) -> Result<bool> {
-    for &act in acts {
-        match perform(act)? {
-            Outcome::Cancelled => return Ok(false),
-            Outcome::Done if exits_after(early_exit, act) => return Ok(true),
-            Outcome::Done => {}
-        }
-    }
-    Ok(false)
-}
 
 // events received since the last Done
 #[derive(Default)]
@@ -242,150 +212,30 @@ pub fn run(
 }
 
 impl Overlay {
-    fn handle(&mut self, request: Request) {
-        match request {
-            Request::PickColor => {
-                if let Err(e) = self.pick_color() {
-                    self.report(&e);
-                }
-            }
-            Request::Run(acts) => self.run_actions(&acts),
-        }
-    }
-
-    fn run_actions(&mut self, acts: &[Act]) {
-        let early_exit = self.settings.early_exit.clone();
-        match run_chain(acts, &early_exit, |act| self.perform(act)) {
-            Ok(true) => self.exit = Some(Ok(())),
-            Ok(false) => {}
-            Err(e) => self.report(&e),
-        }
-    }
-
-    fn report(&self, error: &Error) {
-        let message = format!("{error:#}");
-        util::notify(self.settings.notifications, MSG_FAILED, &message, None);
-    }
-
-    // `shot` is the saved file or the thumbnail, used when the icon is the screenshot
-    fn say(&self, message: &str, shot: Option<&Path>) {
-        let icon = match self.settings.thumbnail {
-            None => None,
-            Some(Thumbnail::AppIcon) => Some(APP_ICON.to_owned()),
-            Some(Thumbnail::Screenshot) => shot.map(|p| p.to_string_lossy().into_owned()),
+    // Runs `f` with the actions borrowed from the overlay; the stacking closure
+    // only needs the connection and the layer.
+    fn with_actions<R>(&mut self, f: impl FnOnce(&mut Actions) -> R) -> R {
+        let (conn, layer) = (&self.conn, &self.layer);
+        let mut stack = |stacking| set_stacking(conn, layer.as_ref(), stacking);
+        let mut actions = Actions {
+            editor: &mut self.editor,
+            settings: &self.settings,
+            last_saved: &mut self.last_saved,
+            stack: &mut stack,
         };
-        let desktop = self.settings.notifications;
-        util::notify(desktop, NAMESPACE, message, icon.as_deref());
+        f(&mut actions)
     }
 
-    fn copy_image(&mut self, announce: bool) -> Result<()> {
-        let png = self.editor.export()?;
-        output::copy(&png, PNG_MIME, self.settings.copy_command.as_deref())?;
-        if announce {
-            let wants_shot = self.settings.thumbnail == Some(Thumbnail::Screenshot);
-            let shot = if wants_shot {
-                Some(output::write_thumbnail(&png)?)
-            } else {
-                None
-            };
-            self.say(MSG_COPIED, shot.as_deref());
+    fn handle(&mut self, request: Request) {
+        if self.with_actions(|a| a.handle(request)) {
+            self.exit = Some(Ok(()));
         }
-        Ok(())
     }
 
     fn auto_copy(&mut self) {
-        if !self.settings.auto_copy || !self.editor.annotations_changed() {
-            return;
-        }
-        if let Err(e) = self.copy_image(false) {
-            self.report(&e);
-        }
-        // exporting commits an open draft, which is not a new change
-        self.editor.annotations_changed();
-    }
-
-    fn perform(&mut self, act: Act) -> Result<Outcome> {
-        let copy_command = self.settings.copy_command.clone();
-        match act {
-            Act::Exit => {}
-            Act::SaveToClipboard => {
-                self.copy_image(true)?;
-                if self.settings.save_after_copy {
-                    self.save_file()?;
-                }
-            }
-            Act::SaveToFile => {
-                self.save_file()?;
-            }
-            Act::SaveToFileAs => return self.save_file_as(),
-            Act::CopyFilepathToClipboard => {
-                let path = match self.last_saved.clone() {
-                    Some(path) => path,
-                    None => self.save_file()?.context("nothing was saved to a file")?,
-                };
-                let text = path.to_string_lossy();
-                output::copy(text.as_bytes(), TEXT_MIME, copy_command.as_deref())?;
-                self.say(MSG_PATH_COPIED, Some(&path));
-            }
-        }
-        Ok(Outcome::Done)
-    }
-
-    // None when the output is stdout
-    fn save_file(&mut self) -> Result<Option<PathBuf>> {
-        let png = self.editor.export()?;
-        if self.settings.output_filename == STDIO_PATH {
-            std::io::stdout()
-                .write_all(&png)
-                .context("could not write to stdout")?;
-            return Ok(None);
-        }
-        let path = output::save(&png, &self.settings.output_filename)?;
-        self.say(&format!("{MSG_SAVED} {}", path.display()), Some(&path));
-        self.last_saved = Some(path.clone());
-        Ok(Some(path))
-    }
-
-    fn save_file_as(&mut self) -> Result<Outcome> {
-        let png = self.editor.export()?;
-        let suggested = output::suggested_path(&self.settings.output_filename)?;
-        let filename = format!("--filename={}", suggested.display());
-        let args = [&ZENITY_SAVE_ARGS[..], &[filename.as_str()]].concat();
-        let Some(chosen) = self.with_dialog(|| util::zenity(&args))? else {
-            return Ok(Outcome::Cancelled);
-        };
-        let path = PathBuf::from(chosen);
-        output::save_to(&png, &path)?;
-        self.say(&format!("{MSG_SAVED} {}", path.display()), Some(&path));
-        self.last_saved = Some(path);
-        Ok(Outcome::Done)
-    }
-
-    fn pick_color(&mut self) -> Result<()> {
-        let picked = self.with_dialog(|| util::zenity(&ZENITY_COLOR_ARGS))?;
-        if let Some(color) = picked.as_deref().and_then(Color::parse) {
-            self.editor.set_color(color);
-        }
-        Ok(())
-    }
-
-    // zenity is a normal window, so push the layer below it meanwhile
-    fn with_dialog<T>(&self, dialog: impl FnOnce() -> Result<T>) -> Result<T> {
-        self.set_stacking(Layer::Bottom, KeyboardInteractivity::None)?;
-        let result = dialog();
-        if let Err(e) = self.set_stacking(Layer::Overlay, KeyboardInteractivity::Exclusive) {
-            self.report(&e);
-        }
-        result
-    }
-
-    fn set_stacking(&self, layer: Layer, keyboard: KeyboardInteractivity) -> Result<()> {
-        if let Some(l) = &self.layer {
-            l.set_layer(layer);
-            l.set_keyboard_interactivity(keyboard);
-            l.commit();
-        }
-        self.conn.flush().context("could not send the layer change")
+        // a method path does not satisfy the higher-ranked closure bound
+        #[allow(clippy::redundant_closure_for_method_calls)]
+        self.with_actions(|actions| actions.auto_copy());
     }
 
     // at most one frame in flight
@@ -846,31 +696,19 @@ impl ProvidesRegistryState for Overlay {
 
 smithay_client_toolkit::delegate_dispatch2!(Overlay);
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn cancelled_dialog_stops_the_chain() {
-        let mut seen = Vec::new();
-        let acts = [Act::SaveToClipboard, Act::SaveToFileAs, Act::Exit];
-        let exit = run_chain(&acts, &[], |act| {
-            seen.push(act);
-            Ok(if act == Act::SaveToFileAs {
-                Outcome::Cancelled
-            } else {
-                Outcome::Done
-            })
-        });
-        assert!(!exit.unwrap());
-        assert_eq!(seen, [Act::SaveToClipboard, Act::SaveToFileAs]);
+fn set_stacking(conn: &Connection, layer: Option<&LayerSurface>, stacking: Stacking) -> Result<()> {
+    if let Some(layer) = layer {
+        match stacking {
+            Stacking::BelowDialog => {
+                layer.set_layer(Layer::Bottom);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+            }
+            Stacking::Overlay => {
+                layer.set_layer(Layer::Overlay);
+                layer.set_keyboard_interactivity(KeyboardInteractivity::Exclusive);
+            }
+        }
+        layer.commit();
     }
-
-    #[test]
-    fn chain_exits_on_exit_or_early_exit() {
-        let done = |_| Ok(Outcome::Done);
-        assert!(run_chain(&[Act::SaveToFile, Act::Exit], &[], done).unwrap());
-        assert!(run_chain(&[Act::SaveToFile], &[ExitTrigger::Save], done).unwrap());
-        assert!(!run_chain(&[Act::SaveToFile], &[ExitTrigger::Copy], done).unwrap());
-    }
+    conn.flush().context("could not send the layer change")
 }

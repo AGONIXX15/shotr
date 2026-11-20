@@ -8,7 +8,7 @@ use crate::{
     config::{
         COLOR_KEYS, CONFIG_DIR, CONFIG_FILE, CORNER_ROUNDNESS, DEFAULT_OUTPUT_FILENAME,
         DEFAULT_ROUND_CAPS, DEFAULT_SMOOTHING, FACTOR_DEFAULT, FACTOR_MAX, FACTOR_MIN, NAMESPACE,
-        PALETTE, PAN_DEFAULT, TEXT_MOVE_DEFAULT, ZOOM_DEFAULT,
+        PALETTE, PAN_DEFAULT, TEXT_MOVE_DEFAULT, ZENITY_PROGRAM, ZOOM_DEFAULT,
     },
     docs::{LICENSE, MAN_PAGE},
     style::Color,
@@ -307,6 +307,8 @@ pub struct Settings {
     pub text_move: f32,
     pub thumbnail: Option<Thumbnail>,
     pub round_caps: bool,
+    // the dialog program, so tests can put a fake in its place
+    pub zenity: String,
 }
 
 pub fn exits_after(early_exit: &[ExitTrigger], act: Act) -> bool {
@@ -355,21 +357,7 @@ impl Settings {
             (None, Some(EarlyExit::Flag(true))) => vec![ExitTrigger::All],
             (None, _) => Vec::new(),
         };
-        let mut palette = match color_palette.palette {
-            Some(list) => list
-                .iter()
-                .map(|s| Color::parse(s).ok_or_else(|| anyhow!("invalid palette colour {s}")))
-                .collect::<Result<Vec<_>>>()?,
-            None => PALETTE.to_vec(),
-        };
-        if palette.is_empty() {
-            return Err(anyhow!("the colour palette is empty"));
-        }
-        if palette.len() > COLOR_KEYS.len() {
-            let message = format!("palette truncated to {} colours", COLOR_KEYS.len());
-            util::notify(false, NAMESPACE, &message, None);
-            palette.truncate(COLOR_KEYS.len());
-        }
+        let palette = resolve_palette(color_palette.palette)?;
         let corner_roundness = cli
             .corner_roundness
             .or(g.corner_roundness)
@@ -443,8 +431,28 @@ impl Settings {
                 .unwrap_or(TEXT_MOVE_DEFAULT),
             thumbnail: cli.notification_thumbnail.or(g.notification_thumbnail),
             round_caps: g.default_round_caps.unwrap_or(DEFAULT_ROUND_CAPS),
+            zenity: ZENITY_PROGRAM.to_owned(),
         })
     }
+}
+
+fn resolve_palette(list: Option<Vec<String>>) -> Result<Vec<Color>> {
+    let mut palette = match list {
+        Some(list) => list
+            .iter()
+            .map(|s| Color::parse(s).ok_or_else(|| anyhow!("invalid palette colour {s}")))
+            .collect::<Result<Vec<_>>>()?,
+        None => PALETTE.to_vec(),
+    };
+    if palette.is_empty() {
+        return Err(anyhow!("the colour palette is empty"));
+    }
+    if palette.len() > COLOR_KEYS.len() {
+        let message = format!("palette truncated to {} colours", COLOR_KEYS.len());
+        util::notify(false, NAMESPACE, &message, None);
+        palette.truncate(COLOR_KEYS.len());
+    }
+    Ok(palette)
 }
 
 fn read_config(explicit: Option<&std::path::Path>) -> Result<FileConfig> {

@@ -139,3 +139,4 @@ pub const DEFAULT_SMOOTHING: usize = 0;
 pub const DEFAULT_ROUND_CAPS: bool = true;
 pub const PREEDIT_UNDERLINE_WIDTH: f32 = 2.0;
 pub const UNDERLINE_OFFSET: f32 = 3.0;
+pub const ZENITY_PROGRAM: &str = "zenity";
